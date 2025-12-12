@@ -1,3 +1,6 @@
+// 
+
+
 const express = require('express');
 const path = require('path');
 const http = require('http');
@@ -6,19 +9,22 @@ const sqlite3 = require('sqlite3').verbose();
 const axios = require('axios');
 const cors = require('cors');
 
-// Discord webhook from Render environment variables
-// Set this in Render dashboard: DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
-
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Serve static files (frontend) from /public
-app.use(express.static(path.join(__dirname, 'public')));
+// Discord webhook URL
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || '';
+
+// ----------------------------------------------------------------------
+// ✔ IMPORTANT: Render needs an ABSOLUTE path that points to a PERSISTENT DISK
+// After adding a disk in Render, mount it to /var/data
+// ----------------------------------------------------------------------
+const DB_PATH = process.env.DB_PATH || "/var/data/weather.db";
+console.log("Using SQLite DB at:", DB_PATH);
 
 // --- SQLite setup ---
-const db = new sqlite3.Database('weather.db');
+const db = new sqlite3.Database(DB_PATH);
 
 db.serialize(() => {
   db.run(`
@@ -31,11 +37,13 @@ db.serialize(() => {
   `);
 });
 
-// --- HTTP server + WebSocket server ---
+// --- Serve static frontend files ---
+app.use(express.static(path.join(__dirname, 'public')));
+
+// --- HTTP + WebSocket server ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Helper to broadcast JSON to all WebSocket clients
 function broadcastJSON(obj) {
   const msg = JSON.stringify(obj);
   wss.clients.forEach(client => {
@@ -45,16 +53,11 @@ function broadcastJSON(obj) {
   });
 }
 
-// Discord notification
-// Version A: ONLY send messages when temperature > 30°C
+// --- Discord Alerts ---
 async function sendDiscordNotification(temp, hum) {
   if (!DISCORD_WEBHOOK_URL) return;
 
-  // Only send alert if temp is above threshold
-  const threshold = 30;
-  if (temp <= threshold) {
-    return; // no message for normal temps
-  }
+  if (temp <= 30) return;
 
   const content =
     `🔥 **HIGH TEMPERATURE ALERT!**\n` +
@@ -67,9 +70,7 @@ async function sendDiscordNotification(temp, hum) {
   }
 }
 
-// --- API routes ---
-
-// Wokwi POSTs here
+// --- API: Wokwi POST endpoint ---
 app.post('/api/readings', (req, res) => {
   const { temperature, humidity } = req.body;
 
@@ -95,9 +96,7 @@ app.post('/api/readings', (req, res) => {
         created_at: createdAt
       };
 
-      // WebSocket clients (frontend live update)
       broadcastJSON({ type: 'new-reading', data: reading });
-      // Discord alert (only if temp > 30°C)
       sendDiscordNotification(temperature, humidity);
 
       res.status(201).json(reading);
@@ -105,7 +104,7 @@ app.post('/api/readings', (req, res) => {
   );
 });
 
-// Get recent readings
+// --- API: Get all / recent readings ---
 app.get('/api/readings', (req, res) => {
   const limit = Number(req.query.limit) || 50;
 
@@ -122,7 +121,7 @@ app.get('/api/readings', (req, res) => {
   );
 });
 
-// Get latest reading
+// --- API: Get latest reading ---
 app.get('/api/readings/latest', (req, res) => {
   db.get(
     'SELECT * FROM readings ORDER BY created_at DESC LIMIT 1',
@@ -138,11 +137,10 @@ app.get('/api/readings/latest', (req, res) => {
   );
 });
 
-// WebSocket connections
+// --- WebSocket connections ---
 wss.on('connection', ws => {
   console.log('WebSocket client connected');
 
-  // Send latest reading immediately (if exists)
   db.get(
     'SELECT * FROM readings ORDER BY created_at DESC LIMIT 1',
     [],
@@ -153,12 +151,10 @@ wss.on('connection', ws => {
     }
   );
 
-  ws.on('close', () => {
-    console.log('WebSocket client disconnected');
-  });
+  ws.on('close', () => console.log('WebSocket client disconnected'));
 });
 
-// Use Render's PORT or 3000 locally
+// --- Start server ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
